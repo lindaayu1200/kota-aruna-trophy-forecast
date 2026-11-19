@@ -1,10 +1,17 @@
-"""gta6-trophy-rarity-forecast-01 entry point (Python 3.13, standard library only).
+"""gta6-trophy-rarity-forecast-01 entry: refresh-aware trophy-rate quantiles.
 
-Keeps the kit starter's I/O conventions and its clamp / logit / round4 helpers; the
-actual forecast lives in model.py.  Each run sees one case, reads every <id>.in in
-MAKEFUN_INPUT_DIR (default /input) and writes <id>.out to MAKEFUN_OUTPUT_DIR
-(default /output).  No randomness, no wall clock, sorted iteration: two runs write
-byte-identical files.
+The grader runs `python3 -P -s /bot/main.py` (Python 3.13, standard library only, PYTHONHASHSEED=0),
+one case per run: every `*.in` in $MAKEFUN_INPUT_DIR (default /input) becomes one `*.out` in
+$MAKEFUN_OUTPUT_DIR (default /output),
+
+    {"trophies": [{"id": n, "q": [q05, q25, q50, q75, q95]}, ...]}
+
+one row per case trophy with five finite, non-decreasing percentages in [0, 100], at most 65,536 bytes.
+The forecast is refresh-aware: on a flat history it applies a launch-refresh prior, on a history with
+real refreshes it fits players and earned counts across the refresh points and extrapolates them.
+
+-P keeps this directory off sys.path, so the sys.path line below is needed for `import model`;
+-s drops user site-packages.
 """
 
 import json
@@ -13,20 +20,14 @@ import os
 import sys
 from pathlib import Path
 
-# The grader's -P leaves /bot off sys.path: put it back first, so `import model` finds
-# model.py shipped beside this file.
+# The grader's -P leaves /bot off sys.path: put it back first, so `import model` finds model.py beside this file.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from model import forecast_case as model_forecast_case  # noqa: E402  (sys.path fix first)
 
 INPUT_DIR = Path(os.environ.get("MAKEFUN_INPUT_DIR", "/input"))
 OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 
-# The quantile levels the contest scores, in the order each row lists them.
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
-# The standard normal's quantile at each level.
 Z = [-1.645, -0.674, 0, 0.674, 1.645]
-# Persistence fallback spread, in logit units per square-root day (the house baseline).
 SIGMA = 0.5
 
 
@@ -39,11 +40,7 @@ def logit(pct: float) -> float:
 
 
 def round4(x: float) -> float | int:
-    """x rounded to 4 decimals, half up, as JavaScript's Math.round(x * 10000) / 10000 does.
-
-    A whole number comes back as an int, so json.dumps writes 100 where JavaScript
-    writes 100 (not 100.0).
-    """
+    """x rounded to 4 decimals, half up, like JavaScript's Math.round(x * 10000) / 10000."""
     scaled = x * 10000
     whole = math.floor(scaled)
     if scaled - whole >= 0.5:
@@ -52,40 +49,25 @@ def round4(x: float) -> float | int:
     return int(value) if value.is_integer() else value
 
 
-def persistence_case(case: dict) -> dict:
-    """The house baseline, used only if the model cannot produce a forecast."""
-    last = case["history"][-1]
-    spread = SIGMA * math.sqrt(case["horizon_minutes"] / 1440)
-    rows = []
-    for i, trophy in enumerate(case["trophies"]):
-        rate = last["rates"][i]
-        lg = logit(rate if rate is not None else 0)
-        rows.append({"id": trophy["id"], "q": [round4(100 / (1 + math.exp(-(lg + z * spread)))) for z in Z]})
-    return {"trophies": rows}
+import model
 
 
 def forecast_case(case: dict, name: str) -> dict:
-    if case.get("levels") != LEVELS:
-        raise ValueError(f"{name} asks for levels {case.get('levels')}, not {LEVELS}")
-    if not case.get("history"):
+    if case["levels"] != LEVELS:
+        raise ValueError(f"{name} asks for levels {case['levels']}, not {LEVELS}")
+    if not case["history"]:
         raise ValueError(f"{name} has no history")
-    try:
-        result = model_forecast_case(case)
-    except Exception:
-        # A forecast that is valid but mediocre beats an invalid case: never crash a case.
-        result = persistence_case(case)
-    return result
+    if not case["trophies"]:
+        raise ValueError(f"{name} has no trophies")
+    return {"trophies": model.forecast_case(case, clamp, logit, round4, Z)}
 
 
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    # Every case file, in name order, so two runs write the same bytes.
     for path in sorted(INPUT_DIR.glob("*.in")):
         case = json.loads(path.read_text(encoding="utf-8"))
         forecast = forecast_case(case, path.name)
-        (OUTPUT_DIR / f"{path.stem}.out").write_text(
-            json.dumps(forecast, separators=(",", ":")) + "\n", encoding="utf-8"
-        )
+        (OUTPUT_DIR / f"{path.stem}.out").write_text(json.dumps(forecast, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
