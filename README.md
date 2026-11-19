@@ -1,6 +1,8 @@
 # kota-aruna-trophy-forecast
 
 [![make.fun · gta6-trophy-rarity-forecast-01](https://make.fun/badge/gta6-trophy-rarity-forecast-01.svg)](https://make.fun/bounty/gta6-trophy-rarity-forecast-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-rarity-forecast-01)
+[![rank](https://make.fun/badge/gta6-trophy-rarity-forecast-01/lindaayu1200/kota-aruna-trophy-forecast/rank.svg)](https://make.fun/bounty/gta6-trophy-rarity-forecast-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-rarity-forecast-01)
+[![reward](https://make.fun/badge/gta6-trophy-rarity-forecast-01/lindaayu1200/kota-aruna-trophy-forecast/reward.svg)](https://make.fun/bounty/gta6-trophy-rarity-forecast-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-rarity-forecast-01)
 
 A program/v1 entry for make.fun's **gta6-trophy-rarity-forecast-01**: from the house's recorded reads of Exophase's Grand Theft Auto VI PS5 trophy page, forecast each trophy's earn rate at the case's target as five quantiles (5/25/50/75/95%), scored by a pinball loss on the logit scale.
 
