@@ -1,5 +1,33 @@
 """Refresh-aware quantile forecast for the GTA VI trophy case."""
 
+# Forecast notes — refresh-aware accrual
+# --------------------------------------
+# Exophase publishes new numbers only at sporadic refresh instants; the reads
+# between two refreshes merely repeat the same snapshot. We therefore compress
+# the history to those instants and treat each one as an observation of two
+# things: the tracked-player pool and the implicit earned count of every
+# trophy (rate times pool, floored at one because rates are rounded).
+# Earned counts are forced to be monotone; a genuine drop in a rate marks the
+# trophy as reset, which relaxes a lower bound used when blending medians.
+# For the median we extrapolate counts forward with a power law in hours since
+# launch. Its decay exponent is estimated jointly from the observed refresh
+# intervals, then nudged per trophy by a structure class: story chains cool
+# off quickly, while grind, collectible, stunt and online trophies keep
+# accruing for longer. A log-linear fit of each trophy's own history is blended
+# with the accrual estimate, and sparse trophies shrink toward a class-specific
+# base rate (the prior) so tiny or fresh counts do not produce wild rates.
+# Dividing the projected count by a projected pool accounts for tracker
+# expansion: the pool fit mixes a global log-slope with the most recent
+# interval growth and is bounded near the last observed value.
+# Staleness matters: the answer read can be hours behind the last refresh, so
+# the target horizon is pulled back by a fraction of the typical refresh gap.
+# Quantiles are logit-normal around the median. The logit sigma combines four
+# variances: Poisson noise in small counts, scatter of the interval decay
+# estimates, uncertainty about how stale the snapshot is, and pool-expansion
+# dilution. It grows with remaining time and is scaled by family-specific
+# width factors, then clamped. Trophies already at 100% stay pinned there.
+# Everything is arithmetic on the input case, with no clocks or randomness.
+
 import math
 from datetime import datetime, timezone
 
