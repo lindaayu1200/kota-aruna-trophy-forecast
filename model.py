@@ -21,11 +21,17 @@
 # interval growth and is bounded near the last observed value.
 # Staleness matters: the answer read can be hours behind the last refresh, so
 # the target horizon is pulled back by a fraction of the typical refresh gap.
+# A flat (no-refresh) history is handled separately: dilution is applied in
+# full only while the aggregate earned/tracked ratio is still well above the
+# post-refresh equilibrium; once it has settled, a short-horizon median stays
+# at the last observed rate instead of collapsing to a floor multiplier.
 # Quantiles are logit-normal around the median. The logit sigma combines four
 # variances: Poisson noise in small counts, scatter of the interval decay
 # estimates, uncertainty about how stale the snapshot is, and pool-expansion
-# dilution. It grows with remaining time and is scaled by family-specific
-# width factors, then clamped. Trophies already at 100% stay pinned there.
+# dilution. It grows with remaining time, is scaled by family-specific width
+# factors, and takes an extra quadrature term on multi-day horizons: two days
+# of history cannot pin down a week-one rate to a fraction of a logit, so the
+# 5/95 tails must stay wide. Trophies already at 100% stay pinned there.
 # Everything is arithmetic on the input case, with no clocks or randomness.
 
 import math
@@ -333,9 +339,13 @@ def flat_branch(case, clamp, logit, round4, z_values):
     p1 = float(last.get("players_tracked") or 0.0)
     E1 = float(last.get("trophies_earned") or 0.0)
     last_rates = last_known_rates(case)
-    h1 = max(0.1, hours_between(first.get("at", first.get("slot")), last.get("at", last.get("slot"))))
-    h2 = max(0.1, h1 + max(0.0, case.get("horizon_minutes", 0)) / 60.0)
-    ratio = h2 / h1
+    # The trailing reads are flat, so the span they cover is the only visible
+    # clock for the next refresh. Cap the extrapolation ratio so a nearly
+    # zero-length flat history cannot collapse the multiplier to its floor.
+    h1 = max(0.25, hours_between(first.get("at", first.get("slot")), last.get("at", last.get("slot"))))
+    horizon_h = max(0.0, case.get("horizon_minutes", 0)) / 60.0
+    h2 = h1 + horizon_h
+    ratio = min(3.0, h2 / h1)
     grown_players = ratio ** 1.21
     grown_earned = ratio ** 0.55
     if p1 > 0 and E1 > p1:
@@ -343,22 +353,32 @@ def flat_branch(case, clamp, logit, round4, z_values):
     else:
         multiplier = 0.22
     multiplier = min(1.5, max(0.05, multiplier))
+    # Once the launch cohort has been diluted (earned/tracked near 1.10), a
+    # further refresh within a short horizon is unlikely to move the rates:
+    # keep the median at the last read and let the spread carry the risk. Early
+    # on, with earned/tracked still far above that level, a refresh is due and
+    # the dilution multiplier above applies in full.
+    dilution = min(1.0, max(0.0, (E1 / p1 - 1.10) / 0.30)) if p1 > 0 else 1.0
+    near_term = min(1.0, horizon_h)
     counts = [max(0.01, (rate or 0.0) / 100.0 * p1) for rate in last_rates]
     non100 = [i for i, rate in enumerate(last_rates) if rate is None or rate < 99.5]
     mean_count = sum(counts[i] for i in non100) / len(non100) if non100 else 1.0
     mean_count = max(mean_count, 0.01)
     days = max(0.0, case.get("horizon_minutes", 0)) / 1440.0
     sigma = max(0.55, 0.35 * math.sqrt(days))
+    sigma = math.sqrt(sigma ** 2 + (0.34 * max(0.0, days - 1.0)) ** 2)
     rows = []
     for i, trophy in enumerate(case["trophies"]):
         rate = last_rates[i] if i < len(last_rates) else None
         if rate is not None and rate >= 99.5:
-            rows.append({"id": trophy["id"], "q": [100] * len(z_values)})
+            rows.append({"id": trophy["id"], "q": [99.99] * len(z_values)})
             continue
         shape = (counts[i] / mean_count) ** 0.25 if i < len(counts) else 1.0
         shape = min(1.6, max(0.6, shape))
         base = float(rate) if rate is not None else 0.0
-        median = min(99.99, max(0.01, base * multiplier * shape))
+        blended = multiplier * shape
+        blended = 1.0 + dilution * near_term * (blended - 1.0)
+        median = min(99.99, max(0.01, base * blended))
         rows.append({
             "id": trophy["id"],
             "q": make_quantiles(median, sigma, clamp, logit, round4, z_values),
@@ -376,7 +396,7 @@ def trend_branch(case, clamp, logit, round4, z_values, reads, hours, samples, dr
     alpha_global, accrual_scatter = estimate_decay(samples)
     refresh_gaps = [b - a for a, b in zip(hours, hours[1:]) if b - a > 0.5]
     mean_gap = sum(refresh_gaps) / len(refresh_gaps) if refresh_gaps else 12.0
-    staleness = min(12.0, max(2.0, 0.5 * mean_gap))
+    staleness = min(12.0, max(2.0, 0.35 * mean_gap))
     h_answer = max(h_last, h_target - staleness)
     pool_answer, pool_slope, pool_hourly = pool_forecast(reads, hours, h_answer)
     days = max(0.0, case.get("horizon_minutes", 0)) / 1440.0
@@ -391,7 +411,7 @@ def trend_branch(case, clamp, logit, round4, z_values, reads, hours, samples, dr
     for i, trophy in enumerate(case["trophies"]):
         rate = last_rates[i] if i < len(last_rates) else None
         if rate is not None and rate >= 99.5:
-            rows.append({"id": trophy["id"], "q": [100] * len(z_values)})
+            rows.append({"id": trophy["id"], "q": [99.99] * len(z_values)})
             continue
         family = families[i]
         points = samples[i]
@@ -418,13 +438,13 @@ def trend_branch(case, clamp, logit, round4, z_values, reads, hours, samples, dr
 
         median_extrap = min(99.0, max(0.01, 100.0 * c_est / pool_answer))
         prior = reference * FAMILY_BASE[family]
-        weight = 0.10 + 0.25 / (1.0 + len(points))
+        weight = 0.06 + 0.15 / (1.0 + len(points))
         if c_est < 8.0:
-            weight += 0.15
-        weight = min(0.5, weight)
+            weight += 0.10
+        weight = min(0.35, weight)
         log_median = (1.0 - weight) * math.log(median_extrap) + weight * math.log(max(0.01, prior))
         if not dropped[i]:
-            log_median = max(log_median, math.log(median_extrap) - 0.25)
+            log_median = max(log_median, math.log(median_extrap) - 0.18)
         median = min(99.0, max(0.01, math.exp(log_median)))
 
         poisson = min(0.8, max(0.03, 1.0 / math.sqrt(c_est + 0.5)))
@@ -433,7 +453,14 @@ def trend_branch(case, clamp, logit, round4, z_values, reads, hours, samples, dr
         accrual = accrual_scatter * min(1.0, math.sqrt(1.0 + remaining / max(24.0, h_last)))
         sigma = math.sqrt(poisson ** 2 + stale ** 2 + pool_uncertainty ** 2 + accrual ** 2)
         sigma *= time_growth * FAMILY_SPREAD[family] * (0.90 + 0.10 * math.sqrt(days))
-        sigma = min(1.2, max(0.15, sigma))
+        # Everything above describes one more refresh step. Over a multi-day
+        # horizon the accrual exponents themselves drift: two days of history
+        # cannot pin down week-one rarity to half a logit. Add a horizon term
+        # in quadrature so the 5/95 quantiles widen on long cases while the
+        # well-covered short-horizon backtests stay sharp.
+        long_horizon = 0.34 * max(0.0, days - 1.0)
+        sigma = math.sqrt(sigma ** 2 + long_horizon ** 2)
+        sigma = min(1.8, max(0.15, sigma))
         rows.append({
             "id": trophy["id"],
             "q": make_quantiles(median, sigma, clamp, logit, round4, z_values),
